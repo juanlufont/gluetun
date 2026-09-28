@@ -3,9 +3,12 @@
 # Description: This script updates the peer port for the Transmission torrent
 # client using its RPC API.
 # Author: Juan Luis Font
+# email: juanlufont@gmail.com
 
 # default values
 DEFAULT_URL="http://localhost:9091/transmission/rpc"
+N_RETRIES=3
+RETRY_DELAY=5
 WGET_OPTS=""
 
 usage() {
@@ -14,19 +17,32 @@ usage() {
     echo "Update Transmission peer-port via RPC API"
     echo ""
     echo "Options:"
-    echo "  -h, --help       Show this help message and exit."
-    echo "  -u, --user USER  Specify the Transmission RPC user name."
-    echo "                   (Omit if not required)"
-    echo "  -p, --pass PASS  Specify the Transmission RPC password."
-    echo "                   (Omit if not required)"
-    echo "  -P, --port PORT  Specify the Transmission Peer Port."
-    echo "                   If PORT is a comma-separated list of ports,"
-    echo "                   only use the first one."
-    echo "                   REQUIRED"
-    echo "  -U, --url  URL   Specify the Transmission RPC URL."
-    echo "                   DEFAULT: ${DEFAULT_URL}"
+    echo "  -h, --help        Show this help message and exit."
+    echo "  -u, --user USER   Specify the Transmission RPC user name."
+    echo "                    (Omit if not required)"
+    echo "  -p, --pass PASS   Specify the Transmission RPC password."
+    echo "                    (Omit if not required)"
+    echo "  -P, --port PORT   Specify the Transmission Peer Port."
+    echo "                    If PORT is a comma-separated list of ports,"
+    echo "                    only use the first one."
+    echo "                    REQUIRED"
+    echo "  -U, --url  URL    Specify the Transmission RPC URL."
+    echo "                    DEFAULT: ${DEFAULT_URL}"
+    echo "  -n, --n-retries   Number of retrys connecting to the Transmission"
+    echo "                    API before finishing execution."
+    echo "                    DEFAULT: ${N_RETRIES}"
+    echo "  -r, --retry-delay delay time (in seconds) between connections"
+    echo "                    atemps to Transmission API."
+    echo "                    DEFAULT: ${RETRY_DELAY} (s)"
     echo "Example:"
-    echo "  $0 -u admin -p **** 40409"
+    echo "  $0 -u admin -p **** -P 40409 -n 2"
+}
+
+# api_up URL - return 0 if the Transmission RPC endpoint at URL responds
+# with HTTP 200, 401 or 409 (i.e. the service is up), non-zero otherwise
+api_up() {
+    _URL="$1"
+    wget -S -O /dev/null --timeout=5 --tries=1 "$_URL" 2>&1 | grep -Eq 'HTTP/[0-9.]+ (200|401|409)'
 }
 
 while [ $# -gt 0 ]; do
@@ -52,6 +68,14 @@ while [ $# -gt 0 ]; do
         ;;
     -U | --url)
         RPC_URL="$2"
+        shift 2
+        ;;
+    -r | --retry-delay)
+        RETRY_DELAY="$2"
+        shift 2
+        ;;
+    -n | --n-retries)
+        N_RETRIES="$2"
         shift 2
         ;;
     *)
@@ -85,9 +109,21 @@ if [ "${_USECRED}" ]; then
         "
 fi
 
-if [ -z "${RPC_URL+x}" ]; then
+if [ -z "${RPC_URL}" ]; then
     RPC_URL="${DEFAULT_URL}"
 fi
+
+# check if transmission API is available
+_retry=0
+while ! api_up "${RPC_URL}"; do
+    if [ "$_retry" -ge "$N_RETRIES" ]; then
+        echo "Transmission API unavailable after ${N_RETRIES} retrys" >&2
+        exit 1
+    fi
+    echo "Transmission API not available (retry ${_retry}/${N_RETRIES}), retrying in ${RETRY_DELAY}s..."
+    _retry=$((_retry + 1))
+    /bin/sleep "$RETRY_DELAY"
+done
 
 # get the X-Transmission-Session-Id
 # shellcheck disable=SC2086
@@ -100,6 +136,11 @@ SESSION_ID=$(
         grep 'X-Transmission-Session-Id:' |
         awk '{print $2}'
 )
+
+if [ -z "$SESSION_ID" ]; then
+    echo "ERROR: Could not get X-Transmission-Session-Id from ${RPC_URL}" >&2
+    exit 1
+fi
 
 # generate payload string
 PAYLOAD=$(printf '{
@@ -123,9 +164,8 @@ RES=$(
 )
 
 # check string returned by wget
-SUCCESS='{"arguments":{},"result":"success"}'
-if [ "$RES" != "$SUCCESS" ]; then
-    echo "ERROR: Could not update Transmission peer-port: ${RES}"
+if ! echo "$RES" | grep -q '"result" *: *"success"'; then
+    echo "ERROR: Could not update Transmission peer-port: ${RES}" >&2
     exit 1
 fi
 
