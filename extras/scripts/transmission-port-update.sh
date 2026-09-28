@@ -130,4 +130,3 @@ if [ "$RES" != "$SUCCESS" ]; then
 fi
 
 echo "Success! Transmission peer-port updated to ${PORT}"
-exit 0
