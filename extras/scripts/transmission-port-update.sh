@@ -31,18 +31,11 @@ usage() {
     echo "  -n, --n-retries   Number of retrys connecting to the Transmission"
     echo "                    API before finishing execution."
     echo "                    DEFAULT: ${N_RETRIES}"
-    echo "  -r, --retry-delay delay time (in seconds) between connections"
+    echo "  -t, --retry-delay delay time (in seconds) between connections"
     echo "                    atemps to Transmission API."
     echo "                    DEFAULT: ${RETRY_DELAY} (s)"
     echo "Example:"
     echo "  $0 -u admin -p **** -P 40409 -n 2"
-}
-
-# api_up URL - return 0 if the Transmission RPC endpoint at URL responds
-# with HTTP 200, 401 or 409 (i.e. the service is up), non-zero otherwise
-api_up() {
-    _URL="$1"
-    wget -S -O /dev/null --timeout=5 --tries=1 "$_URL" 2>&1 | grep -Eq 'HTTP/[0-9.]+ (200|401|409)'
 }
 
 while [ $# -gt 0 ]; do
@@ -113,32 +106,33 @@ if [ -z "${RPC_URL}" ]; then
     RPC_URL="${DEFAULT_URL}"
 fi
 
-# check if transmission API is available
-_retry=0
-while ! api_up "${RPC_URL}"; do
-    if [ "$_retry" -ge "$N_RETRIES" ]; then
-        echo "Transmission API unavailable after ${N_RETRIES} retrys" >&2
-        exit 1
+_attempt=1
+while [ "$_attempt" -le "$N_RETRIES" ]; do
+    # get the X-Transmission-Session-Id
+    # shellcheck disable=SC2086
+    SESSION_ID=$(
+        wget \
+            --quiet \
+            ${WGET_OPTS} \
+            --server-response \
+            "$RPC_URL" 2>&1 |
+            grep 'X-Transmission-Session-Id:' |
+            awk '{print $2}'
+    )
+
+    if [ -n "$SESSION_ID" ]; then
+        echo "Transmission API available. SESSION_ID: $SESSION_ID"
+        break
+    else
+        echo "Attempt $_attempt of $N_RETRIES failed, waiting for next attempt..."
+        sleep "${RETRY_DELAY}"
     fi
-    echo "Transmission API not available (retry ${_retry}/${N_RETRIES}), retrying in ${RETRY_DELAY}s..."
-    _retry=$((_retry + 1))
-    /bin/sleep "$RETRY_DELAY"
+    _attempt=$((_attempt + 1))
 done
 
-# get the X-Transmission-Session-Id
-# shellcheck disable=SC2086
-SESSION_ID=$(
-    wget \
-        --quiet \
-        ${WGET_OPTS} \
-        --server-response \
-        "$RPC_URL" 2>&1 |
-        grep 'X-Transmission-Session-Id:' |
-        awk '{print $2}'
-)
-
+# if SESSION_ID is still empty, exit script
 if [ -z "$SESSION_ID" ]; then
-    echo "ERROR: Could not get X-Transmission-Session-Id from ${RPC_URL}" >&2
+    echo "ERROR: Could not get X-Transmission-Session-Id from ${RPC_URL} after ${N_RETRIES} attemps" >&2
     exit 1
 fi
 
@@ -169,4 +163,4 @@ if ! echo "$RES" | grep -q '"result" *: *"success"'; then
     exit 1
 fi
 
-echo "Success! Transmission peer-port updated to ${PORT}"
+echo "Transmission peer-port updated to ${PORT}"
